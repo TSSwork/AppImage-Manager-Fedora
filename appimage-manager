@@ -87,11 +87,36 @@ refresh_desktop_db() {
         update-desktop-database "$DESKTOP_DIR" 2>/dev/null || true
         info "Desktop database refreshed."
     fi
+    if command -v gtk-update-icon-cache &>/dev/null; then
+        gtk-update-icon-cache -f -t ~/.local/share/icons/hicolor 2>/dev/null || true
+        info "Icon cache refreshed."
+    fi
 }
 
 # Ensure required directories exist
 ensure_dirs() {
     mkdir -p "$APPS_DIR" "$DESKTOP_DIR" "$ICONS_DIR" "$BIN_DIR"
+}
+
+# Safely read metadata.conf without executing it as shell code
+load_meta() {
+    local meta="$1"
+    [[ -f "$meta" ]] || die "Metadata file not found: $meta"
+    while IFS='=' read -r key value; do
+        # Skip blank lines and comments
+        [[ -z "$key" || "$key" == \#* ]] && continue
+        # Strip surrounding quotes from value
+        value="${value#\"}"
+        value="${value%\"}"
+        case "$key" in
+            APP_ID)       APP_ID="$value"       ;;
+            DISPLAY_NAME) DISPLAY_NAME="$value" ;;
+            CATEGORY)     CATEGORY="$value"     ;;
+            ICON_EXT)     ICON_EXT="$value"     ;;
+            ARGS)         ARGS="$value"         ;;
+            INSTALLED)    INSTALLED="$value"    ;;
+        esac
+    done < "$meta"
 }
 
 # --- Mode: Install ------------------------------------------------------------
@@ -172,12 +197,12 @@ mode_install() {
     # Write metadata
     info "Writing metadata..."
     cat > "$app_dir/metadata.conf" <<EOF
-APP_ID=$app_id
-DISPLAY_NAME=$display_name
-CATEGORY=$category
-ICON_EXT=$icon_ext
-ARGS=$launch_args
-INSTALLED=$(date +%Y-%m-%d)
+APP_ID="$app_id"
+DISPLAY_NAME="$display_name"
+CATEGORY="$category"
+ICON_EXT="$icon_ext"
+ARGS="$launch_args"
+INSTALLED="$(date +%Y-%m-%d)"
 EOF
 
     # Write .desktop entry
@@ -232,7 +257,7 @@ mode_update() {
     [[ -d "$app_dir" ]] || die "App '$app_id' is not installed. Use appimage-manager to install it."
 
     local meta="$app_dir/metadata.conf"
-    source "$meta"
+    load_meta "$meta"
 
     info "Updating: $DISPLAY_NAME ($app_id)"
 
@@ -258,12 +283,12 @@ mode_update() {
         local new_ext="${new_icon##*.}"
         cp "$new_icon" "$ICONS_DIR/${app_id}.${new_ext}"
         # Update metadata icon ext
-        sed -i "s/^ICON_EXT=.*/ICON_EXT=$new_ext/" "$meta"
+        sed -i "s/^ICON_EXT=.*/ICON_EXT=\"$new_ext\"/" "$meta"
         info "Icon updated."
     fi
 
     # Update installed date in metadata
-    sed -i "s/^INSTALLED=.*/INSTALLED=$(date +%Y-%m-%d)/" "$meta"
+    sed -i "s/^INSTALLED=.*/INSTALLED=\"$(date +%Y-%m-%d)\"/" "$meta"
 
     refresh_desktop_db
 
@@ -286,7 +311,7 @@ mode_remove() {
     [[ -d "$app_dir" ]] || die "App '$app_id' is not installed."
 
     local meta="$app_dir/metadata.conf"
-    source "$meta"
+    load_meta "$meta"
 
     warn "This will permanently remove: $DISPLAY_NAME ($app_id)"
     confirm "Are you sure?" || { info "Aborted."; exit 0; }
@@ -335,7 +360,7 @@ mode_list_short() {
     if $found; then
         echo -e "  ${CYAN}Installed apps:${RESET}"
         for meta in "$APPS_DIR"/*/metadata.conf; do
-            source "$meta"
+            load_meta "$meta"
             echo "    • $APP_ID  ($DISPLAY_NAME)  — installed $INSTALLED"
         done
         echo ""
@@ -350,7 +375,7 @@ mode_list() {
     local count=0
     if compgen -G "$APPS_DIR/*/metadata.conf" &>/dev/null; then
         for meta in "$APPS_DIR"/*/metadata.conf; do
-            source "$meta"
+            load_meta "$meta"
             count=$((count + 1))
             echo -e "  ${BOLD}$APP_ID${RESET}"
             echo -e "    Name:      $DISPLAY_NAME"
