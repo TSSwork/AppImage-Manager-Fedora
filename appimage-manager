@@ -1,0 +1,415 @@
+#!/usr/bin/env bash
+# =============================================================================
+# appimage-manager — A lightweight AppImage package manager
+# =============================================================================
+# Usage:
+#   appimage-manager              → install a new AppImage
+#   appimage-manager --update     → update an existing AppImage
+#   appimage-manager --remove     → remove an installed AppImage
+#   appimage-manager --list       → list all installed AppImages
+#   appimage-manager --help       → show help
+# =============================================================================
+
+set -euo pipefail
+
+# --- Constants ----------------------------------------------------------------
+APPS_DIR="$HOME/Applications"
+DESKTOP_DIR="$HOME/.local/share/applications"
+ICONS_DIR="$HOME/.local/share/icons"
+BIN_DIR="$HOME/.local/bin"
+
+# --- Colors -------------------------------------------------------------------
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+CYAN='\033[0;36m'
+BOLD='\033[1m'
+RESET='\033[0m'
+
+# --- Helpers ------------------------------------------------------------------
+info()    { echo -e "${CYAN}[INFO]${RESET}  $*"; }
+success() { echo -e "${GREEN}[OK]${RESET}    $*"; }
+warn()    { echo -e "${YELLOW}[WARN]${RESET}  $*"; }
+error()   { echo -e "${RED}[ERROR]${RESET} $*" >&2; }
+die()     { error "$*"; exit 1; }
+
+prompt() {
+    # prompt <varname> <question> [default]
+    local varname="$1"
+    local question="$2"
+    local default="${3:-}"
+    local display_default=""
+    [[ -n "$default" ]] && display_default=" [${default}]"
+    echo -en "${BOLD}${question}${display_default}: ${RESET}"
+    read -r "$varname"
+    # Apply default if empty
+    if [[ -z "${!varname}" && -n "$default" ]]; then
+        printf -v "$varname" '%s' "$default"
+    fi
+}
+
+confirm() {
+    # confirm <question> [default: N]
+    local question="$1"
+    local default="${2:-N}"
+    local yn
+    echo -en "${BOLD}${question} [y/N]: ${RESET}"
+    read -r yn
+    case "${yn:-$default}" in
+        [Yy]*) return 0 ;;
+        *)     return 1 ;;
+    esac
+}
+
+validate_appimage_path() {
+    local path="$1"
+    [[ -f "$path" ]]          || die "File not found: $path"
+    [[ "$path" == *.AppImage ]] || die "File does not end with .AppImage: $path"
+    [[ -r "$path" ]]          || die "File is not readable: $path"
+}
+
+validate_icon_path() {
+    local path="$1"
+    [[ -f "$path" ]] || die "Icon file not found: $path"
+    case "${path,,}" in
+        *.png|*.svg|*.jpg|*.jpeg) ;;
+        *) die "Icon must be a PNG, SVG, or JPG file" ;;
+    esac
+}
+
+validate_app_id() {
+    local id="$1"
+    [[ "$id" =~ ^[a-z0-9_-]+$ ]] || die "App ID must be lowercase letters, numbers, hyphens, or underscores only. Got: $id"
+}
+
+refresh_desktop_db() {
+    if command -v update-desktop-database &>/dev/null; then
+        update-desktop-database "$DESKTOP_DIR" 2>/dev/null || true
+        info "Desktop database refreshed."
+    fi
+}
+
+# Ensure required directories exist
+ensure_dirs() {
+    mkdir -p "$APPS_DIR" "$DESKTOP_DIR" "$ICONS_DIR" "$BIN_DIR"
+}
+
+# --- Mode: Install ------------------------------------------------------------
+mode_install() {
+    echo -e "\n${BOLD}=== AppImage Installer ===${RESET}\n"
+
+    # 1. AppImage path
+    local appimage_path
+    prompt appimage_path "Enter AppImage path"
+    # Expand ~ and variables
+    appimage_path="${appimage_path/#\~/$HOME}"
+    validate_appimage_path "$appimage_path"
+    success "AppImage found: $appimage_path"
+
+    # 2. App ID
+    local app_id
+    prompt app_id "Enter a unique app ID (e.g. helium, obsidian, arduino)"
+    app_id="${app_id,,}"   # force lowercase
+    validate_app_id "$app_id"
+
+    local app_dir="$APPS_DIR/$app_id"
+    [[ -d "$app_dir" ]] && die "App '$app_id' is already installed at $app_dir\nUse --update to update it."
+
+    # 3. Display name
+    local display_name
+    local suggested_name
+    suggested_name="$(echo "$app_id" | sed 's/[-_]/ /g; s/\b\w/\u&/g')"
+    prompt display_name "Display name" "$suggested_name"
+
+    # 4. Icon path
+    local icon_path icon_ext icon_dest
+    prompt icon_path "Path to icon file (PNG/SVG/JPG)"
+    icon_path="${icon_path/#\~/$HOME}"
+    validate_icon_path "$icon_path"
+    icon_ext="${icon_path##*.}"
+    icon_dest="$ICONS_DIR/${app_id}.${icon_ext}"
+    success "Icon found: $icon_path"
+
+    # 5. Category
+    echo ""
+    echo "  Common categories: Development, Utility, AudioVideo, Graphics,"
+    echo "                     Office, Network, Game, Education, Science"
+    local category
+    prompt category "Category" "Utility"
+
+    # 6. Extra launch arguments
+    local launch_args
+    prompt launch_args "Extra launch arguments (optional, e.g. --no-sandbox)" ""
+
+    # 7. Create terminal symlink?
+    local create_symlink=false
+    confirm "Create terminal command '~/.local/bin/$app_id'?" && create_symlink=true
+
+    # 8. Move or copy?
+    local use_move=false
+    confirm "Move AppImage instead of copy? (default: copy, safer)" && use_move=true
+
+    # --- Execute ---
+    echo ""
+    info "Creating app directory: $app_dir"
+    mkdir -p "$app_dir"
+
+    local dest_appimage="$app_dir/app.AppImage"
+    if $use_move; then
+        info "Moving AppImage..."
+        mv "$appimage_path" "$dest_appimage"
+    else
+        info "Copying AppImage..."
+        cp "$appimage_path" "$dest_appimage"
+    fi
+
+    info "Setting executable permissions..."
+    chmod +x "$dest_appimage"
+
+    info "Copying icon..."
+    cp "$icon_path" "$icon_dest"
+
+    # Write metadata
+    info "Writing metadata..."
+    cat > "$app_dir/metadata.conf" <<EOF
+APP_ID=$app_id
+DISPLAY_NAME=$display_name
+CATEGORY=$category
+ICON_EXT=$icon_ext
+ARGS=$launch_args
+INSTALLED=$(date +%Y-%m-%d)
+EOF
+
+    # Write .desktop entry
+    info "Creating desktop entry..."
+    local desktop_file="$DESKTOP_DIR/appimage-${app_id}.desktop"
+    cat > "$desktop_file" <<EOF
+[Desktop Entry]
+Type=Application
+Name=$display_name
+Exec=$dest_appimage $launch_args
+Icon=${app_id}
+Categories=$category;
+Terminal=false
+StartupNotify=true
+X-AppImage-Integrate=false
+EOF
+
+    # Symlink
+    if $create_symlink; then
+        info "Creating terminal command: $BIN_DIR/$app_id"
+        ln -sf "$dest_appimage" "$BIN_DIR/$app_id"
+    fi
+
+    # Optional: trust AppImage for some file managers
+    if command -v gio &>/dev/null; then
+        gio set "$dest_appimage" metadata::trusted true 2>/dev/null || true
+    fi
+
+    refresh_desktop_db
+
+    echo ""
+    success "✓ $display_name installed successfully!"
+    echo -e "  ${CYAN}Location:${RESET} $dest_appimage"
+    echo -e "  ${CYAN}Desktop:${RESET}  $desktop_file"
+    echo -e "  ${CYAN}Icon:${RESET}     $icon_dest"
+    $create_symlink && echo -e "  ${CYAN}Command:${RESET}  $BIN_DIR/$app_id"
+    echo ""
+}
+
+# --- Mode: Update -------------------------------------------------------------
+mode_update() {
+    echo -e "\n${BOLD}=== AppImage Updater ===${RESET}\n"
+
+    # List installed apps
+    mode_list_short
+
+    local app_id
+    prompt app_id "Enter app ID to update"
+    validate_app_id "$app_id"
+
+    local app_dir="$APPS_DIR/$app_id"
+    [[ -d "$app_dir" ]] || die "App '$app_id' is not installed. Use appimage-manager to install it."
+
+    local meta="$app_dir/metadata.conf"
+    source "$meta"
+
+    info "Updating: $DISPLAY_NAME ($app_id)"
+
+    # New AppImage
+    local new_appimage
+    prompt new_appimage "Path to new AppImage"
+    new_appimage="${new_appimage/#\~/$HOME}"
+    validate_appimage_path "$new_appimage"
+
+    # New icon (optional)
+    local new_icon
+    prompt new_icon "Path to new icon (leave empty to keep current)"
+    new_icon="${new_icon/#\~/$HOME}"
+
+    # Execute
+    local dest_appimage="$app_dir/app.AppImage"
+    info "Replacing AppImage..."
+    cp "$new_appimage" "$dest_appimage"
+    chmod +x "$dest_appimage"
+
+    if [[ -n "$new_icon" ]]; then
+        validate_icon_path "$new_icon"
+        local new_ext="${new_icon##*.}"
+        cp "$new_icon" "$ICONS_DIR/${app_id}.${new_ext}"
+        # Update metadata icon ext
+        sed -i "s/^ICON_EXT=.*/ICON_EXT=$new_ext/" "$meta"
+        info "Icon updated."
+    fi
+
+    # Update installed date in metadata
+    sed -i "s/^INSTALLED=.*/INSTALLED=$(date +%Y-%m-%d)/" "$meta"
+
+    refresh_desktop_db
+
+    echo ""
+    success "✓ $DISPLAY_NAME updated successfully!"
+    echo ""
+}
+
+# --- Mode: Remove -------------------------------------------------------------
+mode_remove() {
+    echo -e "\n${BOLD}=== AppImage Remover ===${RESET}\n"
+
+    mode_list_short
+
+    local app_id
+    prompt app_id "Enter app ID to remove"
+    validate_app_id "$app_id"
+
+    local app_dir="$APPS_DIR/$app_id"
+    [[ -d "$app_dir" ]] || die "App '$app_id' is not installed."
+
+    local meta="$app_dir/metadata.conf"
+    source "$meta"
+
+    warn "This will permanently remove: $DISPLAY_NAME ($app_id)"
+    confirm "Are you sure?" || { info "Aborted."; exit 0; }
+
+    info "Removing app directory: $app_dir"
+    rm -rf "$app_dir"
+
+    local desktop_file="$DESKTOP_DIR/appimage-${app_id}.desktop"
+    if [[ -f "$desktop_file" ]]; then
+        info "Removing desktop entry..."
+        rm "$desktop_file"
+    fi
+
+    local icon_file
+    for ext in png svg jpg jpeg; do
+        icon_file="$ICONS_DIR/${app_id}.${ext}"
+        if [[ -f "$icon_file" ]]; then
+            info "Removing icon: $icon_file"
+            rm "$icon_file"
+            break
+        fi
+    done
+
+    local bin_link="$BIN_DIR/$app_id"
+    if [[ -L "$bin_link" ]]; then
+        info "Removing terminal symlink: $bin_link"
+        rm "$bin_link"
+    fi
+
+    refresh_desktop_db
+
+    echo ""
+    success "✓ $DISPLAY_NAME removed successfully!"
+    echo ""
+}
+
+# --- Mode: List ---------------------------------------------------------------
+mode_list_short() {
+    local found=false
+    if compgen -G "$APPS_DIR/*/metadata.conf" &>/dev/null; then
+        for meta in "$APPS_DIR"/*/metadata.conf; do
+            found=true
+            break
+        done
+    fi
+    if $found; then
+        echo -e "  ${CYAN}Installed apps:${RESET}"
+        for meta in "$APPS_DIR"/*/metadata.conf; do
+            source "$meta"
+            echo "    • $APP_ID  ($DISPLAY_NAME)  — installed $INSTALLED"
+        done
+        echo ""
+    else
+        echo -e "  ${YELLOW}No apps installed yet.${RESET}\n"
+    fi
+}
+
+mode_list() {
+    echo -e "\n${BOLD}=== Installed AppImages ===${RESET}\n"
+
+    local count=0
+    if compgen -G "$APPS_DIR/*/metadata.conf" &>/dev/null; then
+        for meta in "$APPS_DIR"/*/metadata.conf; do
+            source "$meta"
+            count=$((count + 1))
+            echo -e "  ${BOLD}$APP_ID${RESET}"
+            echo -e "    Name:      $DISPLAY_NAME"
+            echo -e "    Category:  $CATEGORY"
+            echo -e "    Installed: $INSTALLED"
+            [[ -n "$ARGS" ]] && echo -e "    Args:      $ARGS"
+            echo ""
+        done
+    fi
+
+    if [[ $count -eq 0 ]]; then
+        echo -e "  ${YELLOW}No apps installed yet.${RESET}"
+        echo "  Run appimage-manager to install your first AppImage."
+        echo ""
+    else
+        echo -e "  ${GREEN}Total: $count app(s) installed.${RESET}\n"
+    fi
+}
+
+# --- Mode: Help ---------------------------------------------------------------
+mode_help() {
+    cat <<EOF
+
+${BOLD}appimage-manager${RESET} — Lightweight AppImage package manager
+
+${BOLD}USAGE:${RESET}
+  appimage-manager              Install a new AppImage
+  appimage-manager --update     Update an existing AppImage
+  appimage-manager --remove     Remove an installed AppImage
+  appimage-manager --list       List all installed AppImages
+  appimage-manager --help       Show this help
+
+${BOLD}DIRECTORY LAYOUT:${RESET}
+  ~/Applications/<app-id>/
+  ├── app.AppImage        The AppImage binary
+  ├── icon.<ext>          App icon (PNG/SVG/JPG)
+  └── metadata.conf       App metadata
+
+  ~/.local/share/applications/appimage-<id>.desktop   Desktop entry
+  ~/.local/share/icons/<id>.<ext>                      Icon
+  ~/.local/bin/<id>                                    Terminal symlink (optional)
+
+${BOLD}EXAMPLES:${RESET}
+  appimage-manager              # Install Obsidian or any AppImage
+  appimage-manager --list       # See what's installed
+  appimage-manager --update     # Replace with newer version
+  appimage-manager --remove     # Uninstall cleanly
+
+EOF
+}
+
+# --- Entry Point --------------------------------------------------------------
+ensure_dirs
+
+case "${1:-}" in
+    --update) mode_update ;;
+    --remove) mode_remove ;;
+    --list)   mode_list   ;;
+    --help|-h) mode_help  ;;
+    "")       mode_install ;;
+    *) die "Unknown option: $1\nRun appimage-manager --help for usage." ;;
+esac
