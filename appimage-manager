@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+#  cp appimage-manager ~/.local/bin/appimage-manager
 # =============================================================================
 # appimage-manager — A lightweight AppImage package manager
 # =============================================================================
@@ -15,7 +16,7 @@ set -euo pipefail
 # --- Constants ----------------------------------------------------------------
 APPS_DIR="$HOME/Applications"
 DESKTOP_DIR="$HOME/.local/share/applications"
-ICONS_DIR="$HOME/.local/share/icons"
+ICONS_DIR="$HOME/.local/share/icons/hicolor/scalable/apps/"
 BIN_DIR="$HOME/.local/bin"
 
 # --- Colors -------------------------------------------------------------------
